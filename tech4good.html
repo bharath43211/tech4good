@@ -1,0 +1,414 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Voice + Sign Language Communication System</title>
+
+  <!-- Tailwind CSS -->
+  <script src="https://cdn.tailwindcss.com"></script>
+
+  <!-- TensorFlow.js -->
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@3.21.0/dist/tf.min.js"></script>
+
+  <!-- MediaPipe Hands (and helpers) -->
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+
+  <style>
+    body { background: linear-gradient(90deg,#e3f2fd,#bbdefb); font-family: Inter, system-ui, Arial; }
+    video { display: none; } /* we'll render to canvas */
+    canvas { border-radius: 12px; max-width:100%; height:auto; }
+  </style>
+</head>
+
+<body class="min-h-screen flex items-center justify-center p-6">
+
+  <!-- LOGIN PAGE -->
+  <div id="loginPage" class="bg-white p-8 rounded-2xl shadow-lg w-full max-w-md text-center">
+    <h2 class="text-2xl font-semibold mb-4 text-blue-700">Login</h2>
+    <input id="email" type="email" placeholder="Email" class="w-full mb-3 p-2 border rounded-lg" />
+    <input id="password" type="password" placeholder="Password" class="w-full mb-4 p-2 border rounded-lg" />
+    <div class="flex gap-2">
+      <button id="loginBtn" class="bg-blue-600 text-white w-full py-2 rounded-lg hover:bg-blue-700">Login</button>
+      <!-- Quick guest login -->
+      <button id="guestBtn" class="bg-gray-200 text-gray-700 w-full py-2 rounded-lg hover:bg-gray-300">Guest</button>
+    </div>
+    <p class="mt-4 text-sm text-gray-600">No account required — sign in to start the camera and load model.</p>
+  </div>
+
+  <!-- MAIN PAGE (hidden until login) -->
+  <div id="mainPage" class="w-full max-w-5xl bg-white p-6 rounded-2xl shadow-lg" style="display:none;">
+    <div class="flex items-center justify-between mb-4">
+      <h1 class="text-2xl font-bold text-blue-700">Voice + Sign Language Communication</h1>
+      <div class="text-sm text-gray-600">User: <span id="userEmail">-</span></div>
+    </div>
+
+    <div class="grid md:grid-cols-2 gap-6">
+      <!-- Left: Sign detection -->
+      <div class="flex flex-col items-center">
+        <div class="mb-2 flex flex-wrap gap-2">
+          <button id="openWebcam" class="bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700">Open Webcam</button>
+          <button id="stopWebcam" class="bg-red-500 text-white px-4 py-2 rounded-lg hover:bg-red-600">Stop</button>
+          <button id="reloadModel" class="bg-amber-500 text-white px-4 py-2 rounded-lg hover:bg-amber-600">Reload Model</button>
+        </div>
+
+        <video id="video" autoplay playsinline width="640" height="480"></video>
+        <canvas id="outputCanvas" width="640" height="480" class="shadow-lg"></canvas>
+
+        <div class="flex gap-3 mt-4">
+          <button id="toText" class="bg-green-600 text-white px-4 py-2 rounded-lg hover:bg-green-700">Convert to Text</button>
+          <button id="toVoice" class="bg-purple-600 text-white px-4 py-2 rounded-lg hover:bg-purple-700">Convert to Voice</button>
+        </div>
+      </div>
+
+      <!-- Right: status + voice/text -->
+      <div>
+        <div class="bg-gray-50 p-4 rounded-lg mb-4">
+          <p><strong>Model status:</strong> <span id="modelStatus">Not loaded</span></p>
+          <p class="mt-1"><strong>Model URL:</strong> <input id="modelUrl" class="ml-2 p-1 border rounded w-64" value="/model/model.json" /></p>
+          <p class="mt-2"><strong>Prediction:</strong> <span id="predLabel">—</span></p>
+          <p><strong>Confidence:</strong> <span id="predConf">—</span></p>
+        </div>
+
+        <div class="bg-white p-4 rounded-lg shadow mb-4">
+          <p class="font-semibold mb-2">Detected Text</p>
+          <div id="detectedText" class="text-lg text-gray-700 min-h-[56px]">—</div>
+        </div>
+
+        <div class="bg-white p-4 rounded-lg shadow">
+          <p class="font-semibold mb-2">Voice ↔ Text</p>
+          <textarea id="output" class="w-full h-40 p-3 border rounded-lg" placeholder="Text will appear here..."></textarea>
+          <div class="mt-3 flex gap-2">
+            <button id="voiceToTextBtn" class="bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700">🎤 Voice → Text</button>
+            <button id="textToVoiceBtn" class="bg-purple-600 text-white px-4 py-2 rounded-lg hover:bg-purple-700">🔊 Text → Voice</button>
+          </div>
+          <p class="text-xs text-gray-500 mt-2">Tip: Press keys — o=open webcam, s=stop, t=convert sign→text, v=speak detected text.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+<script>
+/* ---------------------------
+   App state + elements
+   --------------------------- */
+const loginPage = document.getElementById('loginPage');
+const mainPage = document.getElementById('mainPage');
+const loginBtn = document.getElementById('loginBtn');
+const guestBtn = document.getElementById('guestBtn');
+const userEmailEl = document.getElementById('userEmail');
+
+const openWebcamBtn = document.getElementById('openWebcam');
+const stopWebcamBtn = document.getElementById('stopWebcam');
+const reloadModelBtn = document.getElementById('reloadModel');
+const videoEl = document.getElementById('video');
+const canvasEl = document.getElementById('outputCanvas');
+const ctx = canvasEl.getContext('2d');
+
+const modelStatusEl = document.getElementById('modelStatus');
+const modelUrlInput = document.getElementById('modelUrl');
+const predLabelEl = document.getElementById('predLabel');
+const predConfEl = document.getElementById('predConf');
+const detectedTextEl = document.getElementById('detectedText');
+
+const toTextBtn = document.getElementById('toText');
+const toVoiceBtn = document.getElementById('toVoice');
+const outputTextarea = document.getElementById('output');
+const voiceToTextBtn = document.getElementById('voiceToTextBtn');
+const textToVoiceBtn = document.getElementById('textToVoiceBtn');
+
+let camera = null;
+let hands = null;
+let tfModel = null;
+let useMock = false;
+const CLASS_LABELS = ['Hello', 'Thank You', 'Yes', 'No', 'I am fine', 'Welcome']; // update to your labels
+let lastPrediction = { label: '—', confidence: 0 };
+
+/* ---------------------------
+   Login handlers
+   --------------------------- */
+loginBtn.addEventListener('click', () => {
+  const email = document.getElementById('email').value || 'user@example.com';
+  loginPage.style.display = 'none';
+  mainPage.style.display = 'block';
+  userEmailEl.textContent = email;
+  // load model after login
+  loadTFModel();
+});
+
+guestBtn.addEventListener('click', () => {
+  loginPage.style.display = 'none';
+  mainPage.style.display = 'block';
+  userEmailEl.textContent = 'Guest';
+  loadTFModel();
+});
+
+/* ---------------------------
+   Load TF.js model (from input URL)
+   --------------------------- */
+async function loadTFModel() {
+  const url = modelUrlInput.value || '/model/model.json';
+  modelStatusEl.textContent = 'Loading model...';
+  useMock = false;
+  tfModel = null;
+  try {
+    // tf.loadLayersModel will throw if file not found or CORS blocked
+    tfModel = await tf.loadLayersModel(url);
+    modelStatusEl.textContent = 'Model loaded ✅';
+    console.log('Model summary:');
+    try { tfModel.summary(); } catch (e) { /* some models not printable */ }
+  } catch (err) {
+    console.warn('Model load failed:', err);
+    useMock = true;
+    tfModel = null;
+    modelStatusEl.textContent = 'Model not found — using simulated fallback';
+  }
+}
+reloadModelBtn.addEventListener('click', loadTFModel);
+
+/* ---------------------------
+   MediaPipe Hands setup
+   --------------------------- */
+function createHands() {
+  // if already created, dispose
+  if (hands) {
+    // no official dispose — just overwrite
+    hands = null;
+  }
+
+  hands = new Hands({
+    locateFile: (file) => {
+      // point to CDN assets
+      return `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`;
+    }
+  });
+
+  hands.setOptions({
+    maxNumHands: 1,
+    modelComplexity: 1,
+    minDetectionConfidence: 0.65,
+    minTrackingConfidence: 0.6
+  });
+
+  hands.onResults(onHandsResults);
+}
+createHands();
+
+/* ---------------------------
+   Camera start / stop
+   --------------------------- */
+openWebcamBtn.addEventListener('click', async () => {
+  if (camera) return; // already running
+  // start MediaPipe camera helper
+  camera = new Camera(videoEl, {
+    onFrame: async () => {
+      try {
+        await hands.send({ image: videoEl });
+      } catch (e) {
+        console.error('hands.send error', e);
+      }
+    },
+    width: 640,
+    height: 480
+  });
+  camera.start();
+  modelStatusEl.textContent = (tfModel ? 'Model loaded ✅' : (useMock ? 'Using fallback' : 'Model loading...'));
+});
+
+stopWebcamBtn.addEventListener('click', () => {
+  if (camera) {
+    camera.stop();
+    camera = null;
+  }
+  ctx.clearRect(0, 0, canvasEl.width, canvasEl.height);
+});
+
+/* ---------------------------
+   Handle MediaPipe results
+   --------------------------- */
+function onHandsResults(results) {
+  // draw video frame
+  ctx.save();
+  ctx.clearRect(0, 0, canvasEl.width, canvasEl.height);
+  if (results.image) ctx.drawImage(results.image, 0, 0, canvasEl.width, canvasEl.height);
+
+  if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+    const landmarks = results.multiHandLandmarks[0];
+
+    // draw connectors & landmarks (MediaPipe drawing utils)
+    try {
+      drawConnectors(ctx, landmarks, HAND_CONNECTIONS, { color: '#00FF88', lineWidth: 2 });
+      drawLandmarks(ctx, landmarks, { color: '#FF0055', lineWidth: 1 });
+    } catch (e) {
+      // fallback if drawing utils not available
+      // ignore
+    }
+
+    // preprocess and predict
+    const input = preprocessLandmarks(landmarks);
+    runPrediction(input).then(pred => {
+      lastPrediction = pred;
+      predLabelEl.textContent = pred.label;
+      predConfEl.textContent = (pred.confidence * 100).toFixed(1) + '%';
+    }).catch(err => {
+      console.error('Prediction error', err);
+      predLabelEl.textContent = 'Error';
+      predConfEl.textContent = '—';
+    });
+  } else {
+    predLabelEl.textContent = '—';
+    predConfEl.textContent = '—';
+  }
+
+  ctx.restore();
+}
+
+/* ---------------------------
+   Preprocess landmarks -> Float32Array(63)
+   --------------------------- */
+function preprocessLandmarks(landmarks) {
+  // center by wrist and normalize by maxAbs
+  const wrist = landmarks[0];
+  const centered = [];
+  for (let i = 0; i < 21; i++) {
+    centered.push(landmarks[i].x - wrist.x);
+    centered.push(landmarks[i].y - wrist.y);
+    centered.push(landmarks[i].z - wrist.z);
+  }
+  let maxAbs = 0;
+  for (let v of centered) {
+    const a = Math.abs(v);
+    if (a > maxAbs) maxAbs = a;
+  }
+  if (maxAbs === 0) maxAbs = 1.0;
+  const normalized = centered.map(v => v / maxAbs);
+  return new Float32Array(normalized); // length 63
+}
+
+/* ---------------------------
+   Run prediction (model or mock)
+   --------------------------- */
+async function runPrediction(inputFloat32) {
+  if (useMock || !tfModel) {
+    // deterministic-ish random: use small smoothing
+    const idx = Math.floor(Math.random() * CLASS_LABELS.length);
+    return { label: CLASS_LABELS[idx], confidence: Math.random() * 0.35 + 0.6 };
+  }
+
+  // create tensor [1,63]
+  const inputTensor = tf.tensor(inputFloat32, [1, inputFloat32.length]);
+  let preds;
+  try {
+    preds = tfModel.predict(inputTensor);
+  } catch (err) {
+    tf.dispose(inputTensor);
+    throw err;
+  }
+
+  // get probabilities as array
+  let probs;
+  try {
+    // preds may be tensor or array-like
+    if (Array.isArray(preds)) {
+      // multiple outputs, pick first
+      probs = await preds[0].data();
+    } else {
+      probs = await preds.data();
+    }
+  } catch (err) {
+    tf.dispose([inputTensor, preds]);
+    throw err;
+  }
+
+  // find max
+  let maxVal = probs[0], maxIdx = 0;
+  for (let i = 1; i < probs.length; i++) {
+    if (probs[i] > maxVal) { maxVal = probs[i]; maxIdx = i; }
+  }
+
+  // cleanup
+  tf.dispose([inputTensor, preds]);
+
+  const label = CLASS_LABELS[maxIdx] || ('Class ' + maxIdx);
+  return { label, confidence: maxVal };
+}
+
+/* ---------------------------
+   Buttons: Convert to Text / Voice
+   --------------------------- */
+toTextBtn.addEventListener('click', () => {
+  const label = lastPrediction.label || 'No detection yet';
+  detectedTextEl.textContent = label;
+});
+
+toVoiceBtn.addEventListener('click', () => {
+  const text = detectedTextEl.textContent;
+  if (!text || text === '—') {
+    alert('No detected text to speak. Perform a sign first.');
+    return;
+  }
+  const ut = new SpeechSynthesisUtterance(text);
+  ut.rate = 1.0;
+  speechSynthesis.speak(ut);
+});
+
+/* ---------------------------
+   Voice ↔ Text (browser API)
+   --------------------------- */
+voiceToTextBtn.addEventListener('click', startListening);
+textToVoiceBtn.addEventListener('click', () => {
+  const text = outputTextarea.value;
+  if (!text) return;
+  speechSynthesis.speak(new SpeechSynthesisUtterance(text));
+});
+
+function startListening() {
+  const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SpeechRecognition) {
+    alert('SpeechRecognition API not supported in this browser.');
+    return;
+  }
+  const recognition = new SpeechRecognition();
+  recognition.lang = 'en-US';
+  recognition.interimResults = false;
+  recognition.maxAlternatives = 1;
+
+  recognition.onstart = () => modelStatusEl.textContent = 'Listening...';
+  recognition.onerror = (evt) => {
+    console.error('Speech recognition error', evt);
+    modelStatusEl.textContent = 'Speech recognition error';
+  };
+  recognition.onresult = (e) => {
+    const txt = e.results[0][0].transcript;
+    outputTextarea.value = txt;
+    modelStatusEl.textContent = 'Listening complete';
+  };
+  recognition.onend = () => {
+    // no-op
+  };
+  recognition.start();
+}
+
+/* ---------------------------
+   Keyboard shortcuts
+   --------------------------- */
+window.addEventListener('keydown', (e) => {
+  if (e.key === 'o') openWebcamBtn.click();
+  if (e.key === 's') stopWebcamBtn.click();
+  if (e.key === 't') toTextBtn.click();
+  if (e.key === 'v') toVoiceBtn.click();
+});
+
+/* ---------------------------
+   Notes for running model locally
+   ---------------------------
+   - If you host a tfjs model locally (model.json + shards),
+     serve the folder with a simple HTTP server (python -m http.server) to avoid CORS.
+   - If model.json path is different, paste it into the Model URL field and press "Reload Model".
+   --------------------------- */
+</script>
+
+</body>
+</html>
